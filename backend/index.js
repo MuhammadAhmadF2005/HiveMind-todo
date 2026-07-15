@@ -59,6 +59,12 @@ const initDb = async () => {
     `);
     console.log('🐘 Todos table synchronized!');
 
+    // Add index to speed up user-specific query filtering
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_todos_user_id ON todos (user_id);
+    `);
+    console.log('🐘 Index on todos(user_id) synchronized!');
+
     // Migration: add completed_at column for existing databases
     await pool.query(`
       ALTER TABLE todos ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP DEFAULT NULL;
@@ -116,11 +122,20 @@ const validateEmail = (email) => {
   return emailRegex.test(email);
 };
 
-// Helper to add isOverdue flag
-const enrichTodoWithOverdue = (todo) => ({
-  ...todo,
-  isOverdue: todo.dueDate && new Date(todo.dueDate) < new Date() && !todo.completed
-});
+// Helper to add isOverdue flag based on date parts (ignoring hours)
+const enrichTodoWithOverdue = (todo) => {
+  if (!todo || !todo.dueDate || todo.completed) {
+    return { ...todo, isOverdue: false };
+  }
+  const [year, month, day] = todo.dueDate.split('-').map(Number);
+  const dueDateLocal = new Date(year, month - 1, day);
+  const todayLocal = new Date();
+  todayLocal.setHours(0, 0, 0, 0);
+  return {
+    ...todo,
+    isOverdue: dueDateLocal < todayLocal
+  };
+};
 
 // AUTHENTICATION ENDPOINTS
 
@@ -129,9 +144,13 @@ app.post('/auth/signup', async (req, res) => {
   try {
     const { email, password, confirmPassword } = req.body;
 
-    // Validation
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password are required.' });
+    // Type checking validation to prevent type-based crashes
+    if (typeof email !== 'string' || typeof password !== 'string') {
+      return res.status(400).json({ error: 'Email and password must be strings.' });
+    }
+
+    if (!email.trim() || !password.trim()) {
+      return res.status(400).json({ error: 'Email and password cannot be empty.' });
     }
 
     if (!validateEmail(email)) {
@@ -176,8 +195,12 @@ app.post('/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password are required.' });
+    if (typeof email !== 'string' || typeof password !== 'string') {
+      return res.status(400).json({ error: 'Email and password must be strings.' });
+    }
+
+    if (!email.trim() || !password.trim()) {
+      return res.status(400).json({ error: 'Email and password cannot be empty.' });
     }
 
     // Find user
@@ -419,11 +442,18 @@ const purgeOldCompletedTasks = async () => {
 const startServer = async () => {
   await initDb();
   await purgeOldCompletedTasks();
-  setInterval(purgeOldCompletedTasks, AUTO_PURGE_INTERVAL_MS);
+  
+  if (process.env.NODE_ENV !== 'test') {
+    setInterval(purgeOldCompletedTasks, AUTO_PURGE_INTERVAL_MS);
 
-  app.listen(PORT, () => {
-    console.log(`🚀 HiveMind Enterprise Core operational on port ${PORT}`);
-  });
+    app.listen(PORT, () => {
+      console.log(`🚀 HiveMind Enterprise Core operational on port ${PORT}`);
+    });
+  }
 };
 
-startServer();
+if (process.env.NODE_ENV !== 'test') {
+  startServer();
+}
+
+module.exports = { app, pool, initDb, purgeOldCompletedTasks };
